@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# portkill — inspect what's listening on your ports, in a table, and kill it on command
+set -euo pipefail
+
+# ── Colors ────────────────────────────────────────────────────────────────────
+RED=$'\033[0;31m'; YELLOW=$'\033[1;33m'; GREEN=$'\033[0;32m'
+CYAN=$'\033[0;36m'; BOLD=$'\033[1m'; RESET=$'\033[0m'
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+info()    { echo -e "${CYAN}[INFO]${RESET}  $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*" >&2; }
+error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; }
+success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
+debug()   { [[ "${VERBOSE:-0}" == "1" ]] && echo -e "${BOLD}[DEBUG]${RESET} $*" || true; }
+die()     { error "$*"; exit 1; }
+
+# ── Usage ─────────────────────────────────────────────────────────────────────
+usage() {
+  cat <<EOF
+${BOLD}Usage:${RESET}
+  $(basename "$0") [PORT]
+  $(basename "$0") -kill PORT [-f]
+
+${BOLD}Description:${RESET}
+  Lists processes listening on TCP ports in a table (PORT, PID, PROCESS, USER),
+  and can kill whatever is bound to a given port.
+
+${BOLD}Arguments:${RESET}
+  PORT                Show only this port instead of every listening port
+
+${BOLD}Options:${RESET}
+  -k, -kill, --kill PORT   Kill the process(es) listening on PORT
+  -f, --force              With -kill, send SIGKILL immediately (skip graceful SIGTERM)
+  -h, --help                Show this help message
+  -v, --verbose             Enable verbose output
+  -n, --dry-run              Show what would be killed without doing it
+  --self-test                Run internal parser self-check and exit
+
+${BOLD}Examples:${RESET}
+  $(basename "$0")                 # table of every listening port
+  $(basename "$0") 5432             # only show what's on port 5432
+  $(basename "$0") -kill 3000       # kill whatever is on port 3000
+  $(basename "$0") -kill 3000 -f    # force-kill (SIGKILL) immediately
+
+EOF
+}
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
+VERBOSE=0
+DRY_RUN=0
+FORCE=0
+KILL_PORT=""
+SELF_TEST=0
+POSITIONAL_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)        usage; exit 0 ;;
+    -v|--verbose)     VERBOSE=1; shift ;;
+    -n|--dry-run)     DRY_RUN=1; shift ;;
+    -f|--force)       FORCE=1; shift ;;
+    -k|-kill|--kill)
+      [[ $# -ge 2 ]] || die "-kill requires a PORT argument"
+      KILL_PORT="$2"; shift 2 ;;
+    --self-test)      SELF_TEST=1; shift ;;
+    --) shift; POSITIONAL_ARGS+=("$@"); break ;;
+    -*) die "Unknown option: $1. Run $(basename "$0") --help for usage." ;;
+    *)  POSITIONAL_ARGS+=("$1"); shift ;;
+  esac
+done
+
+[[ -n "$KILL_PORT" && ! "$KILL_PORT" =~ ^[0-9]+$ ]] && die "PORT must be numeric, got: $KILL_PORT"
+if [[ ${#POSITIONAL_ARGS[@]} -ge 1 && ! "${POSITIONAL_ARGS[0]}" =~ ^[0-9]+$ ]]; then
+  die "PORT must be numeric, got: ${POSITIONAL_ARGS[0]}"
+fi
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+run() {
+  debug "Running: $*"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    info "[dry-run] $*"
+  else
+    "$@"
+  fi
+}
+
+require_cmd() {
+  command -v "$1" &>/dev/null || die "Required command not found: $1"
+}
+
+# Parses `lsof -nP -iTCP -sTCP:LISTEN` body lines into "PORT PID PROCESS USER" rows.
+parse_listen_rows() {
+  awk '
+    {
+      port = $NF == "(LISTEN)" ? $(NF-1) : $NF
+      sub(/.*:/, "", port)
+      print port, $2, $1, $3
+    }
+  ' | sort -n -u -k1,1
+}
+
+print_table() {
+  local filter="${1:-}"
+  local raw
+  raw=$(lsof -nP +c0 -iTCP -sTCP:LISTEN 2>/dev/null | tail -n +2) || true
+
+  if [[ -z "$raw" ]]; then
+    warn "No listening TCP ports found."
+    return 0
+  fi
+
+  local rows
+  rows=$(echo "$raw" | parse_listen_rows)
+
+  if [[ -n "$filter" ]]; then
+    rows=$(echo "$rows" | awk -v p="$filter" '$1 == p')
+    if [[ -z "$rows" ]]; then
+      warn "Nothing is listening on port $filter"
+      return 0
+    fi
+  fi
+
+  printf "${BOLD}%-8s %-8s %-24s %-12s${RESET}\n" "PORT" "PID" "PROCESS" "USER"
+  echo "$rows" | while read -r port pid proc user; do
+    printf "%-8s %-8s %-24s %-12s\n" "$port" "$pid" "$proc" "$user"
+  done
+}
+
+kill_port() {
+  local port="$1"
+  local pids
+  pids=$(lsof -ti tcp:"$port" 2>/dev/null) || true
+  [[ -z "$pids" ]] && die "No process is listening on port $port"
+
+  local pid pname
+  for pid in $pids; do
+    pname=$(ps -p "$pid" -o comm= 2>/dev/null | xargs basename 2>/dev/null || echo "unknown")
+
+    if [[ "$FORCE" == "1" ]]; then
+      info "Force-killing PID $pid ($pname) on port $port"
+      run kill -KILL "$pid" 2>/dev/null || warn "Could not signal PID $pid (permission denied?)"
+      continue
+    fi
+
+    info "Killing PID $pid ($pname) on port $port"
+    run kill -TERM "$pid" 2>/dev/null || { warn "Could not signal PID $pid (permission denied?)"; continue; }
+
+    [[ "$DRY_RUN" == "1" ]] && continue
+
+    sleep 0.3
+    if kill -0 "$pid" 2>/dev/null; then
+      warn "PID $pid still alive after SIGTERM, sending SIGKILL"
+      run kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+
+  [[ "$DRY_RUN" == "0" ]] && success "Port $port freed."
+}
+
+# ponytail: minimal parser check, not a full test suite — add more cases if parsing ever misbehaves
+self_test() {
+  local sample expected got
+  sample=$(cat <<'EOF'
+node      1234 malhar   23u  IPv6 0x1          0t0  TCP *:3000 (LISTEN)
+postgres  5678 malhar   7u   IPv4 0x2          0t0  TCP 127.0.0.1:5432 (LISTEN)
+EOF
+)
+  expected=$'3000 1234 node malhar\n5432 5678 postgres malhar'
+  got=$(echo "$sample" | parse_listen_rows)
+  if [[ "$got" == "$expected" ]]; then
+    success "self-test passed"
+    exit 0
+  else
+    error "self-test FAILED"
+    echo "expected:"; echo "$expected"
+    echo "got:"; echo "$got"
+    exit 1
+  fi
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+main() {
+  require_cmd lsof
+  require_cmd awk
+
+  [[ "$SELF_TEST" == "1" ]] && self_test
+
+  if [[ -n "$KILL_PORT" ]]; then
+    kill_port "$KILL_PORT"
+    exit 0
+  fi
+
+  print_table "${POSITIONAL_ARGS[0]:-}"
+}
+
+main "$@"
