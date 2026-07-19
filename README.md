@@ -2,21 +2,11 @@
 
 See what's listening on your ports, in a table, and kill it in one command.
 
-```
-$ portkill
-PORT     PID      PROCESS                  USER
-3000     52790    node                     malhar
-5432     76954    postgres                 malhar
-8765     55851    Python                   malhar
-
-$ portkill -kill 3000
-[INFO]  Killing PID 52790 (node) on port 3000
-[OK]    Port 3000 freed.
-```
+![portkill demo](https://raw.githubusercontent.com/Justmalhar/portkill/main/assets/demo.png)
 
 ## Install
 
-Via Homebrew (personal tap):
+Via [Homebrew](https://brew.sh) (personal tap):
 
 ```
 brew tap justmalhar/tap
@@ -40,12 +30,20 @@ chmod +x /usr/local/bin/portkill
 ```
 portkill                 # table of every listening TCP port
 portkill 5432             # only show what's on port 5432
-portkill -kill 3000       # kill whatever is on port 3000 (SIGTERM, escalates to SIGKILL if needed)
+portkill -kill 3000       # kill whatever is on port 3000
 portkill -kill 3000 -f    # force-kill (SIGKILL) immediately
 portkill -kill 3000 -n    # dry run — show what would be killed
 ```
 
-Flags: `-k`/`-kill`/`--kill PORT`, `-f`/`--force`, `-n`/`--dry-run`, `-v`/`--verbose`, `-h`/`--help`.
+| Flag | Description |
+|---|---|
+| `PORT` | Positional argument — show only this port instead of every listening port |
+| `-k`, `-kill`, `--kill PORT` | Kill the process(es) listening on `PORT` (SIGTERM, escalates to SIGKILL if still alive) |
+| `-f`, `--force` | With `-kill`, send `SIGKILL` immediately, skipping the graceful `SIGTERM` |
+| `-n`, `--dry-run` | Show what would be killed without doing it |
+| `-v`, `--verbose` | Enable verbose output |
+| `-h`, `--help` | Show the help message |
+| `--self-test` | Run the internal parser self-check and exit |
 
 ## Requirements
 
@@ -55,3 +53,7 @@ macOS or Linux with `lsof` and `awk` (both ship by default on macOS).
 
 Reads `lsof -iTCP -sTCP:LISTEN` for the listing, and `lsof -ti tcp:<port>` to resolve PIDs for
 killing. No daemons, no config file, no dependencies beyond what's already on your machine.
+
+## License
+
+[MIT](LICENSE)
