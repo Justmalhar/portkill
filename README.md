@@ -20,8 +20,13 @@ Via Homebrew (personal tap):
 
 ```
 brew tap justmalhar/tap
+brew trust --formula justmalhar/tap/portkill   # one-time: this is a third-party tap, not homebrew-core
 brew install portkill
 ```
+
+Newer Homebrew versions refuse to load formulae from non-core taps until you explicitly trust
+them — this is a client-side consent step stored in `~/.homebrew/trust.json`, not something a
+tap owner can pre-approve for you. See [Tap Trust](https://docs.brew.sh/Tap-Trust).
 
 Manual install (no Homebrew):
 
